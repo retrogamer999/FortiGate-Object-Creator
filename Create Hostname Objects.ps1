@@ -1,4 +1,4 @@
-#############################################################
+﻿#############################################################
 #
 # Script: Create-AddressObjects.PS1
 # Description: This Script will Read a CSV file Included In
@@ -11,29 +11,39 @@
 #
 #
 #############################################################
-#Make Script location the current folder
-Split-Path -parent $MyInvocation.MyCommand.Definition | Set-Location
+
+# Make Script location the current folder
+Split-Path -Path $MyInvocation.MyCommand.Definition -Parent | Set-Location
  
 function Answer-YesNo {
-#Function Returns Boolean output from a yes/no question
-#
-# Usage: Answer-YesNo "Question Text" "Title Text"
-#
-$yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes",""
-$no = New-Object System.Management.Automation.Host.ChoiceDescription "&No",""
-$choices = [System.Management.Automation.Host.ChoiceDescription[]]($yes,$no)
-$caption = "Warning!" #Default Caption
-if ($args[1] -ne $null){
-$caption = $args[1]} # Caption Passed as argument
-$message = "Do you want to proceed" #Default Message
-if ($args[0] -ne $null){
-$message = $args[0]} #Message passed as argument
-$result = $Host.UI.PromptForChoice($caption,$message,$choices,0)
-if($result -eq 0) {return $true}
-if($result -eq 1) {return $false}
+  <#
+    .DESCRIPTION
+    Function Returns Boolean output from a yes/no question
+
+    .EXAMPLE
+    Answer-YesNo "Question Text" "Title Text"
+  #>
+  [OutputType('System.Boolean')]
+  Param (
+      [Parameter(Position = 0)]
+      [string]$Question = 'Do you want to proceed',
+      [Parameter(Position = 1)]
+      [string]$Title = 'Warning!'
+  )
+
+  $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes",""
+  $no = New-Object System.Management.Automation.Host.ChoiceDescription "&No",""
+  $choices = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)
+
+  $result = $Host.UI.PromptForChoice($Title, $Question, $choices, 0)
+
+  if ($result -eq 0) {return $true}
+  if ($result -eq 1) {return $false}
 }
-clear
-Write-Host -ForegroundColor Green "
+
+Clear-Host
+
+Write-Host -ForegroundColor Green @'
 #############################################################################
 #
 # FORTIGATE 5.X / 6.x / 7.x FQDN OBJECT BULK IMPORT SCRIPT GENERATOR
@@ -48,65 +58,93 @@ Write-Host -ForegroundColor Green "
 #
 #############################################################################
  
-"
- 
-$VDOMName= ""
-$ScriptStart = ""
-$UseVDOMs = Answer-YesNo "Does The Fortigate Configured with VDOMs?" "VDOM Configuration"
-If ($UseVDOMs -eq $True){
-#VDOM Names are Case Sensitive Using the wrong Case could create a new vdom in the CLI
-$VDOMName = Read-Host "Please Enter VDOM Name (!!Case Sensitive!!):"
-$ScriptStart = "
+'@
+
+# Defining partial script templates
+$vdom_template = @"
+# VDOM SELECTION
 config vdom
-edit $VDOMName"}
-$MakeGroup = Answer-YesNo "Will you be creating a group for the imported Objects?" "Please Provide a Y or N Answer:"
-$AddressObjects = Import-Csv .\Hostnames.csv
-$Script = "
-$ScriptStart
-config firewall address
-"
-$MemberList = ""
-If ($MakeGroup -eq $true){
-$GroupName = Read-Host -Prompt "
-Please Enter the Name of the Object Group You Wish to Create
-(NOTE:Avoid Using Spaces)"
-$GroupComment = Read-Host -Prompt "
-Enter A Comment Describing this Group
-(ex. `"Webserver: dparr/Aug 4, 2016`")"
-$GroupScript = "
-$ScriptStart
+edit "{0}"
+
+
+"@
+
+$address_template = @'
+# ADDRESS CREATION
+config firewall adress
+{0}
+end
+'@
+
+$group_template = @'
+
+
+# GROUP CREATION
 config firewall addrgrp
-edit `"$GroupName`"
-set member"
+  edit "{0}"
+    set member {1}
+    set comment "{2}"
+  next
+end
+'@
+
+# Importing addresses from the csv file
+[array]$AddressObjects = Import-Csv .\Hostnames.csv
+if ($AddressObjects.Count -eq 0) {
+  throw "The Hostnames.csv file contains no addresses to create"
 }
-$AddressObjects | foreach {
-$Hostname = $_.Address
-$Name = $_.Name.substring(0,1).toupper()+$_.Name.substring(1).tolower()
-$Comment = $_.Comment
- 
-$Script += "
-edit `"$Name`"
-set type fqdn
-set fqdn `"$Hostname`"
-set comment `"$Comment`"
-next"
-if ($MakeGroup -eq $true){
-$MemberList += " `"$Name`""}
+
+# Add a property called 'TitleCaseName' to all address objects with the properly formatted name
+$AddressObjects = $AddressObjects | Select-Object Name, Hostname, Comment, @{'Name' = 'TitleCaseName'; 'Expression' = { [CultureInfo]::CurrentCulture.TextInfo.ToTitleCase($_.Name) }}
+
+# User questions
+$UseVDOMs = Answer-YesNo "Does The Fortigate Configured with VDOMs?" "VDOM Configuration"
+if ($UseVDOMs -eq $True) {
+  # VDOM Names are Case Sensitive Using the wrong Case could create a new vdom in the CLI
+  $VDOMName = Read-Host "Please Enter VDOM Name (!!Case Sensitive!!):"
 }
-$Script += "
-end"
-if ($MakeGroup -eq $true){
-$GroupScript += "$MemberList
-set comment `"$GroupComment`"
-next
-end"
+
+$MakeGroup = Answer-YesNo "Will you be creating a group for the imported Objects?" "Please Provide a Y or N Answer:"
+
+If ($MakeGroup -eq $true) {
+  $GroupName = Read-Host -Prompt '
+  Please Enter the Name of the Object Group You Wish to Create
+  (NOTE:Avoid Using Spaces)'
+  $GroupComment = Read-Host -Prompt '
+  Enter A Comment Describing this Group
+  (ex. "Webserver: dparr/Aug 4, 2016")'
 }
+
+# Prepare the cli commands for creating each address object
+$addresses_cli = $AddressObjects | ForEach-Object {
+@"
+  edit "$($_.TitleCaseName)"
+    set type fqdn
+    set fqdn "$($_.Hostname)"
+    set comment "$($_.Comment)"
+  next
+"@
+}
+
+# Assemble the final script from the previously defined partial templates
+$Script = ""
+if ($UseVDOMs) {
+  $Script += $vdom_template -f $VDOMName
+}
+
+$Script += $address_template -f ($addresses_cli -join [System.Environment]::NewLine)
+
+if ($MakeGroup) {
+  $GroupMembersQuoted = $AddressObjects.TitleCaseName | ForEach-Object { '"{0}"' -f $_ }
+  $Script += $group_template -f $GroupName, ($GroupMembersQuoted -join ','), $GroupComment
+}
+
+Write-Host "***** Script Preview *****"
 Write-Host $Script
-$Script > .\Hostnames.txt
-$GroupScript >> .\Hostnames.txt
-Clear
- 
-If ((Answer-YesNo "The CLI Script Has been Written to .\Hostnames.txt Would you like to open this file in notepad now?" "Open CLI Script File?") -eq $true){
- 
-Notepad .\Hostnames.txt
+Write-Host "**************************"
+
+Set-Content -LiteralPath .\Hostnames.txt -Value $Script
+
+If ((Answer-YesNo "The CLI Script Has been Written to .\Hostnames.txt Would you like to open this file in notepad now?" "Open CLI Script File?") -eq $true) {
+  Notepad .\Hostnames.txt
 }
